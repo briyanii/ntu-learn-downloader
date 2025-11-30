@@ -187,6 +187,7 @@ class NTULearnClient:
     def signin(self):
         email = self.credentials.get_email()
         password = self.credentials.get_password()
+        print('Signing in with provided credentials')
         self.wait_for_input_then_send_keys(
                 email_input_selector, email)
         self.wait_for_input_then_send_keys(
@@ -223,6 +224,7 @@ class NTULearnClient:
         self.driver.get(self.COURSES_PAGE)
         self.wait_for_page_or_signin(self.COURSES_PAGE)
 
+        print("Extracting course list")
         course_cards = self.wait_for_cards_to_load()
         courses_info = NTULearnClient.course_cards_to_info(course_cards)
         open_courses_info = list(filter(
@@ -289,18 +291,20 @@ class NTULearnClient:
         
     def wait_for_page_or_signin(self, page, timeout=10):
         driver = self.driver
-        res = WebDriverWait(driver, timeout).until(EC.any_of(
+        res1 = WebDriverWait(driver, timeout).until(EC.any_of(
             # returns element
             EC.presence_of_element_located((By.CSS_SELECTOR, sso_form_selector)),
             # returns page url
             Condition.url_is_any(page), 
         ))
-        if not isinstance(res, str):
+        if not isinstance(res1, str):
             self.signin()
 
-        res = WebDriverWait(driver, timeout).until(
+        res2 = WebDriverWait(driver, timeout).until(
             Condition.url_is_any(page), 
         )
+        if isinstance(res1, str):
+            print('Authenticated!')
 
     def wait_for_input_then_send_keys(self, css_selector, keys, timeout=10):
         driver = self.driver
@@ -416,6 +420,7 @@ class NTULearnClient:
                     selector,
                 ))
             )
+            driver.implicitly_wait(1)
         except Exception as e: 
             logging.warning(
                 "Unable to locate any attachments "
