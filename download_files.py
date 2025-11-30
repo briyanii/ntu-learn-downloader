@@ -2,6 +2,7 @@
 # ==================== CODE ===========================
 
 import re
+import logging
 import time
 import zipfile
 import getpass
@@ -24,7 +25,7 @@ from selenium.webdriver.common.by import By
 EMAIL = None
 
 # Location on disk to download .zip folders to
-DOWNLOAD_DIR = os_path.expand_user('~/Downloads')
+DOWNLOAD_DIR = os_path.expanduser('~/Downloads')
 
 # It is bad practice to save passwords in plain-text
 # do so at your own risk
@@ -33,7 +34,29 @@ PASSWORD = None
 # maximum threads for concurrent downloads
 MAX_WORKERS = 8
 
+# ===================== CSS SELECTORS ==============
+sso_form_selector = 'form[action*="https://login.microsoftonline.com"]'
+
+email_input_selector = 'input[type="email"]'
+password_input_selector = 'input[type="password"]'
+next_input_selector = 'input[type="submit"][value="Next"]'
+signin_input_selector = 'input[type="submit"][value="Sign in"]'
+yes_input_selector = 'input[type="submit"][value="Yes"]'
+
+course_list_selector = '.course-list' 
+course_card_id_selector = '.course-id' 
+course_card_title_selector = '.course-title .js-course-title-element'
+course_card_status_selector = '.course-status'
+course_card_selector = 'bb-base-course-card article'
+
+content_tree_item_selector = 'li[id*="Link$ReferredToType:CONTENT"]'
+content_tree_item_link_selector = 'a[href][title][target="content"]'
+content_folder_attachment_selector = '[id="contentListItem:{0}"] .attachments li'
+content_folder_attachment_link_selector = 'a[href*="/bbcswebdav"]'
+
+body_selector = 'body'
 # ==================== CODE ===========================
+
 
 def clean_filename(name):
     name = re.sub(r'[^a-zA-Z-_0-9.]+', '_', name).strip('_')
