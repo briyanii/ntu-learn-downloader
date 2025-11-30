@@ -28,7 +28,7 @@ options:
 2. Signs in to NTU Learn with you provided credentials
 2. Extract your open courses from `https://ntulearn.ntu.edu.sg/ultra/course`
 3. Prompt you to choose a course to download files from
-4. Extracts content folder structure from `https://ntulearn.ntu.edu.sg/webapps/blackboard/content/courseMenu.jsp?course_id={course_idd}&newWindow=true&openInParentWindow=true`
+4. Extracts content folder structure from `https://ntulearn.ntu.edu.sg/webapps/blackboard/content/courseMenu.jsp?course_id={course_id}&newWindow=true&openInParentWindow=true`
 5. Extracts attachment URLS from those content folder sections
 6. Downloads all the files to `<DOWNLOAD_DIR>/<COURSE_NAME>_<TIME>.zip`
 
