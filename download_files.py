@@ -43,7 +43,7 @@ next_input_selector = 'input[type="submit"][value="Next"]'
 signin_input_selector = 'input[type="submit"][value="Sign in"]'
 yes_input_selector = 'input[type="submit"][value="Yes"]'
 
-course_list_selector = '.course-list' 
+course_list_selector = '#main-content-inner'
 course_card_id_selector = '.course-id' 
 course_card_title_selector = '.course-title .js-course-title-element'
 course_card_status_selector = '.course-status'
@@ -56,7 +56,6 @@ content_folder_attachment_link_selector = 'a[href*="/bbcswebdav"]'
 
 body_selector = 'body'
 # ==================== CODE ===========================
-
 
 def clean_filename(name):
     name = re.sub(r'[^a-zA-Z-_0-9.]+', '_', name).strip('_')
