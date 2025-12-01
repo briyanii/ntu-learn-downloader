@@ -35,26 +35,26 @@ PASSWORD = None
 MAX_WORKERS = 8
 
 # ===================== CSS SELECTORS ==============
-sso_form_selector = 'form[action*="https://login.microsoftonline.com"]'
+SSO_FORM_SELECTOR = 'form[action*="https://login.microsoftonline.com"]'
 
-email_input_selector = 'input[type="email"]'
-password_input_selector = 'input[type="password"]'
-next_input_selector = 'input[type="submit"][value="Next"]'
-signin_input_selector = 'input[type="submit"][value="Sign in"]'
-yes_input_selector = 'input[type="submit"][value="Yes"]'
+EMAIL_INPUT_SELECTOR = 'input[type="email"]'
+PASSWORD_INPUT_SELECTOR = 'input[type="password"]'
+NEXT_INPUT_SELECTOR = 'input[type="submit"][value="Next"]'
+SIGNIN_INPUT_SELECTOR = 'input[type="submit"][value="Sign in"]'
+YES_INPUT_SELECTOR = 'input[type="submit"][value="Yes"]'
 
-course_list_selector = '#main-content-inner'
-course_card_id_selector = '.course-id' 
-course_card_title_selector = '.course-title .js-course-title-element'
-course_card_status_selector = '.course-status'
-course_card_selector = 'bb-base-course-card article'
+COURSE_LIST_SELECTOR = '#main-content-inner'
+COURSE_CARD_ID_SELECTOR = '.course-id' 
+COURSE_CARD_TITLE_SELECTOR = '.course-title .js-course-title-element'
+COURSE_CARD_STATUS_SELECTOR = '.course-status'
+COURSE_CARD_SELECTOR = 'bb-base-course-card article'
 
-content_tree_item_selector = 'li[id*="Link$ReferredToType:CONTENT"]'
-content_tree_item_link_selector = 'a[href][title][target="content"]'
-content_folder_attachment_selector = '[id="contentListItem:{0}"] .attachments li'
-content_folder_attachment_link_selector = 'a[href*="/bbcswebdav"]'
+CONTENT_TREE_ITEM_SELECTOR = 'li[id*="Link$ReferredToType:CONTENT"]'
+CONTENT_TREE_ITEM_LINK_SELECTOR = 'a[href][title][target="content"]'
+CONTENT_FOLDER_ATTACHMENT_SELECTOR = '[id="contentListItem:{0}"] .attachments li'
+CONTENT_FOLDER_ATTACHMENT_LINK_SELECTOR = 'a[href*="/bbcswebdav"]'
 
-body_selector = 'body'
+BODY_SELECTOR = 'body'
 # ==================== CODE ===========================
 
 def clean_filename(name):
@@ -188,12 +188,12 @@ class NTULearnClient:
         password = self.credentials.get_password()
         print('Signing in with provided credentials')
         self.wait_for_input_then_send_keys(
-                email_input_selector, email)
+                EMAIL_INPUT_SELECTOR, email)
         self.wait_for_input_then_send_keys(
-                password_input_selector, password)
-        self.wait_for_button_presence_then_click(next_input_selector)
-        self.wait_for_button_presence_then_click(signin_input_selector)
-        self.wait_for_button_presence_then_click(yes_input_selector)
+                PASSWORD_INPUT_SELECTOR, password)
+        self.wait_for_button_presence_then_click(NEXT_INPUT_SELECTOR)
+        self.wait_for_button_presence_then_click(SIGNIN_INPUT_SELECTOR)
+        self.wait_for_button_presence_then_click(YES_INPUT_SELECTOR)
 
     @staticmethod
     def course_card_to_info(card):
@@ -201,9 +201,9 @@ class NTULearnClient:
         card_info = {'course_id': course_id}
         
         for key, selector in [
-            ('short_name', course_card_id_selector),
-            ('long_name', course_card_title_selector),
-            ('status', course_card_status_selector)
+            ('short_name', COURSE_CARD_ID_SELECTOR),
+            ('long_name', COURSE_CARD_TITLE_SELECTOR),
+            ('status', COURSE_CARD_STATUS_SELECTOR)
         ]:
             info_elem = card.find_element(By.CSS_SELECTOR, selector)
             text = info_elem.get_attribute('textContent').strip()
@@ -237,11 +237,11 @@ class NTULearnClient:
 
         course_cards = WebDriverWait(driver, timeout).until(
             EC.presence_of_all_elements_located((
-                By.CSS_SELECTOR, course_card_selector
+                By.CSS_SELECTOR, COURSE_CARD_SELECTOR
             ))
         )
         scrollable_course_list = driver.find_element(
-                By.CSS_SELECTOR, course_list_selector)
+                By.CSS_SELECTOR, COURSE_LIST_SELECTOR)
         container_rect = Element.get_bounding_rect(
                 driver, scrollable_course_list)
 
@@ -292,7 +292,7 @@ class NTULearnClient:
         driver = self.driver
         res1 = WebDriverWait(driver, timeout).until(EC.any_of(
             # returns element
-            EC.presence_of_element_located((By.CSS_SELECTOR, sso_form_selector)),
+            EC.presence_of_element_located((By.CSS_SELECTOR, SSO_FORM_SELECTOR)),
             # returns page url
             Condition.url_is_any(page), 
         ))
@@ -327,7 +327,7 @@ class NTULearnClient:
         driver.get(path)
         contents = WebDriverWait(driver, timeout).until(
             EC.presence_of_all_elements_located((
-                By.CSS_SELECTOR, content_tree_item_selector 
+                By.CSS_SELECTOR, CONTENT_TREE_ITEM_SELECTOR 
             ))
         )
         
@@ -337,7 +337,7 @@ class NTULearnClient:
             # initialize folder
             content_id = elem.get_attribute('id').split(':::')[1]
             elem_link = elem.find_element(
-                By.CSS_SELECTOR, content_tree_item_link_selector
+                By.CSS_SELECTOR, CONTENT_TREE_ITEM_LINK_SELECTOR
             )
             filename = elem_link.get_attribute('title').strip()
             filename = clean_filename(filename)
@@ -360,7 +360,7 @@ class NTULearnClient:
 
         # when we traverse up parents, collect the index
         body = driver.find_element(
-            By.CSS_SELECTOR, body_selector
+            By.CSS_SELECTOR, BODY_SELECTOR
         )
         
 
@@ -407,7 +407,7 @@ class NTULearnClient:
         driver = self.driver
         content_id = folder['content_id']
         course_id = folder['course_id']
-        selector = content_folder_attachment_selector.format(content_id)
+        selector = CONTENT_FOLDER_ATTACHMENT_SELECTOR.format(content_id)
         href = folder['href']
 
         driver.get(href)
@@ -431,7 +431,7 @@ class NTULearnClient:
         for a_idx, attachment_elem in enumerate(attachment_elems):
             link_elem = attachment_elem.find_element(
                 By.CSS_SELECTOR, 
-                content_folder_attachment_link_selector
+                CONTENT_FOLDER_ATTACHMENT_LINK_SELECTOR
             )
             try:
                 m = re.match(r'(.*?)\s+\(([^\)]+)\)', attachment_elem.text)
