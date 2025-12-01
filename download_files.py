@@ -1,5 +1,5 @@
 #!/bin/python3
-# ==================== CODE ===========================
+# ==================== IMPORTS ===========================
 
 import re
 import logging
@@ -13,7 +13,7 @@ from collections import Counter
 from threading import Lock
 from requests import Session as RequestsSession
 from concurrent.futures import ThreadPoolExecutor
-
+from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver import Chrome as ChromeWebDriver
 from selenium.webdriver.support.ui import WebDriverWait
@@ -43,6 +43,8 @@ NEXT_INPUT_SELECTOR = 'input[type="submit"][value="Next"]'
 SIGNIN_INPUT_SELECTOR = 'input[type="submit"][value="Sign in"]'
 YES_INPUT_SELECTOR = 'input[type="submit"][value="Yes"]'
 
+COURSE_LIST_MANAGEMENT_CONTAINER_SELECTOR = '.course-overview-management-container'
+COURSE_LIST_FILTER_DELETE_SELECTOR = '.course-overview-management-container [class*="makeStyleschipContainer"] button[aria-label="delete"]'
 COURSE_LIST_SELECTOR = '#main-content-inner'
 COURSE_CARD_ID_SELECTOR = '.course-id' 
 COURSE_CARD_TITLE_SELECTOR = '.course-title .js-course-title-element'
@@ -218,12 +220,22 @@ class NTULearnClient:
             for card in cards
         ]
 
-    def enumerate_courses(self):
+    def enumerate_courses(self, timeout=10):
         logging.info(f'Navigate to {self.COURSES_PAGE}')
-        self.driver.get(self.COURSES_PAGE)
+        driver = self.driver
+        driver.get(self.COURSES_PAGE)
         self.wait_for_page_or_signin(self.COURSES_PAGE)
+        # wait for presence of mangement container element
+        # this should indicate that the page has loaded
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((
+                By.CSS_SELECTOR, 
+                COURSE_LIST_MANAGEMENT_CONTAINER_SELECTOR,
+            ))
+        )
 
         print("Extracting course list")
+        self.disable_course_filters_if_any()
         course_cards = self.wait_for_cards_to_load()
         courses_info = NTULearnClient.course_cards_to_info(course_cards)
         open_courses_info = list(filter(
@@ -232,18 +244,39 @@ class NTULearnClient:
         ))
         return open_courses_info
    
+    def disable_course_filters_if_any(self, timeout=5):
+        driver = self.driver
+        chips = driver.find_elements(
+            By.CSS_SELECTOR, 
+            COURSE_LIST_FILTER_DELETE_SELECTOR
+        )
+        print(f"Disabling {len(chips)}(?) filters")
+        disable_count = 0
+        for del_chip in chips:
+            try:
+                del_chip.click()
+                disable_count += 1
+            except StaleElementReferenceException:
+                # certain delete buttons cause other buttons to be removed
+                # e.g. the delete button in the text input area deletes the chips too 
+                pass
+        return disable_count
+
     def wait_for_cards_to_load(self, timeout=10):
         driver = self.driver
-
-        course_cards = WebDriverWait(driver, timeout).until(
-            EC.presence_of_all_elements_located((
-                By.CSS_SELECTOR, COURSE_CARD_SELECTOR
-            ))
+        driver.implicitly_wait(1)
+        course_cards = driver.find_elements(
+            By.CSS_SELECTOR, 
+            COURSE_CARD_SELECTOR
         )
         scrollable_course_list = driver.find_element(
-                By.CSS_SELECTOR, COURSE_LIST_SELECTOR)
+            By.CSS_SELECTOR, 
+            COURSE_LIST_SELECTOR
+        )
         container_rect = Element.get_bounding_rect(
-                driver, scrollable_course_list)
+            driver,
+            scrollable_course_list
+        )
 
         height = driver.execute_script('return window.innerHeight');
         offset = 0
@@ -265,6 +298,8 @@ class NTULearnClient:
                     break
 
             cards_in_view = course_cards[offset:offset+n_in_viewport]
+            # course card needs to be in viewport for information to load
+            # wait for course info to be loaded
             WebDriverWait(driver, timeout).until(
                 Condition.course_cards_are_complete(cards_in_view)
             )
