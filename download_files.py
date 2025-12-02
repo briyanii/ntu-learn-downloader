@@ -1086,14 +1086,17 @@ class Downloader:
     def download_all_to_zip(
         self, 
         download_infos,
-        overwrite=False
+        overwrite=False,
+        prefix='',
     ):
-        zf_name = str(uuid.uuid4()) + '.zip'
+        uid = str(uuid.uuid4())
+        prefix = clean_filename(prefix)
+        zf_name = f'{prefix}{uid}.zip'
         zf_path = os.path.join(self.download_dir, zf_name)
 
         zf = ThreadSharedZipFile(zf_path, 'w')
         logger.info(f'Downloading files to {zf_path}')
-        print(f'Downloading files to {zf_path}')
+        #print(f'Downloading files to {zf_path}')
 
         all_futures = []
         for info_idx, download_info in enumerate(download_infos):
@@ -1101,6 +1104,8 @@ class Downloader:
             all_futures.extend(futures)
 
         wait_for_futures(all_futures)
+        logger.info(f'Files can be found at {zf_path}')
+        #print(f'Files can be found at {zf_path}')
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -1213,5 +1218,8 @@ if __name__ == '__main__':
         )
         downloader.download_all_to_zip(
             download_infos,
+            prefix = (
+                course_info['short_name'] + '-'
+            ),
         )
 

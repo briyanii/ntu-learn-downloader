@@ -50,7 +50,7 @@ The script provides 3 ways to input your password.
 6. Extracts media links from Course Media page
 7. Starts playing each video to trigger request for HLS stream / .m3u8 files
 8. Retrieves .m3u8 file containing `#EXT-X-STREAM-INF` from network responses using Chrome Devtools Protocol
-9. Downloads all the files to `<DOWNLOAD_DIR>/<RANDOM_UUID>.zip`
+9. Downloads all the files to `<DOWNLOAD_DIR>/<COURSE_NAME>-<RANDOM_UUID>.zip`
 
 ## How to play .m3u8 files
 * Open file in browser `file://<PATH_TO_M3U8_FILE>`
