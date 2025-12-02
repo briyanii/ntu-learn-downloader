@@ -1,18 +1,25 @@
 #!/bin/python3
 # ==================== IMPORTS ===========================
-
+import json
+import uuid
 import re
+import base64
 import logging
 import time
 import zipfile
+import tempfile
 import getpass
 import argparse
-from os import path as os_path
+import subprocess
+import os
 
 from collections import Counter
 from threading import Lock
 from requests import Session as RequestsSession
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as wait_for_futures
+
+# ==================== IMPORTS REQURING PIP INSTALL ===========================
 from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver import Chrome as ChromeWebDriver
@@ -20,19 +27,13 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 
-# ================== HARDCODED CONFIG / CREDENTIALS ================
-# NTU email (e.g. bob1234@e.ntu.edu.sg)
-EMAIL = None
+# =========== IMPORT FROM OTHER SCRIPT ==============
+import config
 
-# Location on disk to download .zip folders to
-DOWNLOAD_DIR = os_path.expanduser('~/Downloads')
-
-# It is bad practice to save passwords in plain-text
-# do so at your own risk
-PASSWORD = None
-
-# maximum threads for concurrent downloads
-MAX_WORKERS = 8
+# ===================== OTHER CONSTANTS ==============
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36"
+WINDOW_W = 1920
+WINDOW_H = 1080
 
 # ===================== CSS SELECTORS ==============
 SSO_FORM_SELECTOR = 'form[action*="https://login.microsoftonline.com"]'
@@ -45,6 +46,8 @@ YES_INPUT_SELECTOR = 'input[type="submit"][value="Yes"]'
 
 COURSE_LIST_MANAGEMENT_CONTAINER_SELECTOR = '.course-overview-management-container'
 COURSE_LIST_FILTER_DELETE_SELECTOR = '.course-overview-management-container [class*="makeStyleschipContainer"] button[aria-label="delete"]'
+COURSE_LIST_ITEMS_PER_PAGE_BUTTON_SELECTOR = '.course-overview-management-container button[aria-label*="items per page"]'
+COURSE_LIST_ITEM_PER_PAGE_OPTION = '.course-overview-management-container #page-selector-menu li[role="menuitem"]'
 COURSE_LIST_SELECTOR = '#main-content-inner'
 COURSE_CARD_ID_SELECTOR = '.course-id' 
 COURSE_CARD_TITLE_SELECTOR = '.course-title .js-course-title-element'
@@ -56,13 +59,137 @@ CONTENT_TREE_ITEM_LINK_SELECTOR = 'a[href][title][target="content"]'
 CONTENT_FOLDER_ATTACHMENT_SELECTOR = '[id="contentListItem:{0}"] .attachments li'
 CONTENT_FOLDER_ATTACHMENT_LINK_SELECTOR = 'a[href*="/bbcswebdav"]'
 
+IFRAME_SELECTOR_TEMPLATE = 'iframe[src*="{0}"]'
+
+CONTENT_TREE_COURSE_MEDIA_LINK_SELECTOR = (
+    'li[id*="Link$ReferredToType:TOOL"] '
+    'a[title="Course Media"][target="content"]'
+)
+COURSE_MEDIA_THUMBNAIL_SELECTOR = '#galleryGrid .thumbnail'
+COURSE_MEDIA_THUMBNAIL_NAME_SELECTOR = 'p.thumb_name_content'
+COURSE_MEDIA_THUMBNAIL_LINK_SELECTOR = 'a.item_link[href]'
+
+KALTURA_PLAYER_SELECTOR = '#kplayer'
+KALTURA_PLAY_BUTTON_SELECTOR = '#kplayer button[aria-label="Play"]'
+
 BODY_SELECTOR = 'body'
+# ==================== LOGGING ===========================
+logger = logging.getLogger('ntu-learn-downloader')
+logger.setLevel(logging.INFO)
+
+handler = logging.StreamHandler()
+formatter = logging.Formatter('%(levelname)s - %(name)s - %(message)s')
+
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 # ==================== CODE ===========================
 
 def clean_filename(name):
     name = re.sub(r'[^a-zA-Z-_0-9.]+', '_', name).strip('_')
     return name
 
+class M3U8:
+    STREAM_INFO_PREFIX = '#EXT-X-STREAM-INF'
+    MEDIA_PREFIX = '#EXT-X-MEDIA'
+
+    @staticmethod
+    def split_m3u8(text):
+        delim = '#EXT'
+        parts = re.split(r'(#EXT)', text)
+        chunk = []
+        for part in parts:
+            if part == delim:
+                chunk = ''.join(chunk)
+                chunk = chunk.strip()
+                if chunk:
+                    yield chunk
+                chunk = [part]
+            else:
+                chunk.append(part)
+        
+        chunk = ''.join(chunk)
+        chunk = chunk.strip()
+        if chunk:
+            yield chunk
+        
+    @staticmethod
+    def parse_kv_string(text):
+        try:
+            parsed = {}
+            for kv in text.split(','):
+                # text may include '='
+                # ensure that we only split for the first '='
+                k,v = kv.split('=', 1)
+                v = v.strip('"')
+                parsed[k] = v
+            return parsed
+        except Exception as e:
+            logger.error(
+                f'Error occured while parsing key-value string {text}'
+            )
+            raise e
+
+    @staticmethod
+    def parse_m3u8_chunk(chunk_text):
+        try:
+            if chunk_text == '#EXTM3U':
+                # header
+                return None
+
+            _, chunk_type, chunk_kv_string = re.split(
+                r'(#EXT[-A-Z]+):', chunk_text)
+            if chunk_type == M3U8.STREAM_INFO_PREFIX:
+                chunk_kv_string, uri = chunk_kv_string.split('\n')
+                parsed = M3U8.parse_kv_string(chunk_kv_string)
+                parsed['URI'] = uri
+                parsed['chunk_type'] = 'stream_info'
+            elif chunk_type == M3U8.MEDIA_PREFIX:
+                parsed = M3U8.parse_kv_string(chunk_kv_string)
+                parsed['chunk_type'] = 'media'
+            else:
+                logger.warning(f'No parser implemented for {chunk_type}')
+                return None
+            
+            return parsed
+        except Exception as e:
+            logger.error(f"Exception occured while parsing m3u8 chunk:\n{e}")
+            raise e
+
+    @staticmethod
+    def parse_m3u8(text):
+        streams = []
+        subtitles = []
+
+        for chunk in M3U8.split_m3u8(text):
+            parsed = M3U8.parse_m3u8_chunk(chunk)
+            if parsed is None:
+                continue
+            parsed['original_m3u8_text'] = chunk
+            chunk_type = parsed['chunk_type']
+            if (
+                chunk_type == 'media'
+            ) and (
+                parsed['TYPE'] == 'SUBTITLES'
+            ):
+                subtitles.append(parsed)
+            elif chunk_type == 'stream_info':
+                streams.append(parsed)
+
+        # sort streams by quality (in case they are not already)
+        streams = sorted(
+            streams,
+            key=lambda x: -int(x['BANDWIDTH'])
+        )
+        for stream in streams:
+            stream['subtitles'] = list(filter(
+                lambda x: x['GROUP-ID'] == stream['SUBTITLES'],
+                subtitles
+            ))
+        
+        return {
+            'streams': streams,
+        }
+    
 class Element:
     @staticmethod
     def get_bounding_rect(driver, elem):
@@ -133,7 +260,9 @@ class Condition:
         def condition(driver):
             values = list(incomplete_set)
             for i in values:
-                card_info = NTULearnClient.course_card_to_info(course_cards[i])
+                card_info = NTULearnClient.course_card_to_info(
+                    course_cards[i]
+                )
                 is_complete = True
                 for v in card_info.values():
                     if len(v.strip()) == 0:
@@ -161,6 +290,34 @@ class Credentials:
             return password
         return self.password
 
+class StatefulKalturaResponseHistoryFilter:
+    def __init__(self):
+        self.filter_start_time = time.time()
+        self.latest_time_seen = -1000
+        self.filter_end_time = float('inf')
+    
+    def prepare_for_use(self):
+        self.filter_start_time = max(
+            self.filter_start_time, 
+            self.latest_time_seen
+        )
+        self.filter_end_time = time.time()
+
+    def __call__(self, x):
+        if x['time'] <= self.filter_start_time:
+            return False
+        elif x['time'] >= self.filter_end_time:
+            return False
+        if x['mimeType'] not in {
+            'application/x-mpegurl',
+            'application/vnd.apple.mpegurl',
+        }:
+            return False
+        
+        self.latest_time_seen = max(self.latest_time_seen, x['time'])
+        return True
+
+
 class NTULearnClient:
     BASE_URL = 'https://ntulearn.ntu.edu.sg'
     SSO_LOGIN_BASE_URL = 'https://login.microsoftonline.com'
@@ -175,13 +332,68 @@ class NTULearnClient:
     def __init__(self, credentials):
         self.credentials = credentials
         options = Options()
-        options.add_argument('--headless')
+        options.add_argument('--headless=new')
+        options.add_argument(f"--window-size={WINDOW_W},{WINDOW_H}")
+        options.add_argument(f'user-agent={USER_AGENT}')
+        options.set_capability('goog:loggingPrefs', {
+            'performance': 'ALL',
+        })
         self.driver = ChromeWebDriver(
-            options
+            options=options
         )
+        self.driver.execute_cdp_cmd("Network.enable", {})
+        self.driver.execute_cdp_cmd("Page.enable", {})
+
+        self.log_thread_executor = ThreadPoolExecutor(max_workers=1)
+        self.log_thread_executor.submit(self.log_watcher_loop)
+        self.link_history_lock = Lock()
+        self.link_history = []
+        
+        self.response_history_lock = Lock()
+        self.response_history = []
+
+    def log_watcher_loop(self):
+        try:
+            while True:
+                for entry in self.driver.get_log('performance'):
+                    message = json.loads(entry['message'])['message']
+                    method = message['method']
+                    # track frame navigation log events
+                    try:
+                        if method == 'Page.frameNavigated':
+                            url = message['params']['frame']['url']
+                            with self.link_history_lock:
+                                self.link_history.append({
+                                    'url': url,
+                                    'time': time.time(),
+                                })
+                            logger.debug(f'Navigated to: {url}')
+                    
+                        elif method == 'Network.responseReceived':
+                            resp = message['params']['response']
+                            request_id = message['params']['requestId']
+                            url = resp.get('url', '')
+                            status = resp.get('status')
+                            mimetype = resp.get('mimeType')
+                            
+                            with self.response_history_lock:
+                                self.response_history.append({
+                                    'request_id': request_id,
+                                    'url': url,
+                                    'mimeType': mimetype,
+                                    'status': status,
+                                    'time': time.time(),
+                                })
+                    except Exception as e:
+                        logger.error(f'Failed to parse {method}')
+                        print(f"Error while parsing {method}")
+
+            time.sleep(0.2)
+        except Exception as e:
+            logger.error(f'Log watcher failed:\n{e}')
 
     def goto_home(self):
-        logging.info(f'Navigate to {self.HOME_PAGE}')
+        logger.info(f'Navigate to {self.HOME_PAGE}')
         self.driver.get(self.HOME_PAGE)
         self.wait_for_page_or_signin(self.HOME_PAGE)
     
@@ -219,22 +431,85 @@ class NTULearnClient:
             NTULearnClient.course_card_to_info(card) 
             for card in cards
         ]
+    
+    def enumerate_course_media(self, course_info, timeout=10):
+        driver = self.driver
+        self.goto_course_content_tree(course_info)
+        
+        # get course media link
+        link = WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((
+                By.CSS_SELECTOR,
+                CONTENT_TREE_COURSE_MEDIA_LINK_SELECTOR
+            ))
+        )
+        href = link.get_attribute('href')
+        # navigate to course media
+        # this will open an iframe
+        driver.get(href)
+        iframe = WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((
+                By.CSS_SELECTOR,        
+                'iframe'
+                #IFRAME_SELECTOR_TEMPLATE.format(href)
+            ))
+        )
+        driver.switch_to.frame(iframe)
+
+        # find gallery thumbnails
+        thumbnails = WebDriverWait(driver, timeout).until(
+            EC.presence_of_all_elements_located((
+                By.CSS_SELECTOR,
+                COURSE_MEDIA_THUMBNAIL_SELECTOR
+            ))
+        )
+
+        media_infos = []
+        for thumbnail in thumbnails:
+            media_name = thumbnail.find_element(
+                By.CSS_SELECTOR,
+                COURSE_MEDIA_THUMBNAIL_NAME_SELECTOR
+            )
+            media_name = media_name.text.strip()
+            media_link = thumbnail.find_element(
+                By.CSS_SELECTOR,
+                COURSE_MEDIA_THUMBNAIL_LINK_SELECTOR
+            )
+            href = medi_link = media_link.get_attribute('href')
+            media_infos.append({
+                'short_name': course_info['short_name'],
+                'name': media_name,
+                'href': href
+            })
+        msg = f'Found {len(media_infos)} media items'
+        logger.info(msg)
+        driver.switch_to.default_content()
+        return media_infos
+    
+    def extract_playlists_from_media_infos(self, media_infos):
+        playlists = [
+            self.extract_m3u8_playlist(x)
+            for x in media_infos if x is not None
+        ]
+        playlists = list(filter(lambda x: x is not None, playlists))
+        return playlists
 
     def enumerate_courses(self, timeout=10):
-        logging.info(f'Navigate to {self.COURSES_PAGE}')
+        logger.info(f'Navigate to {self.COURSES_PAGE}')
         driver = self.driver
         driver.get(self.COURSES_PAGE)
         self.wait_for_page_or_signin(self.COURSES_PAGE)
         # wait for presence of mangement container element
         # this should indicate that the page has loaded
         WebDriverWait(driver, timeout).until(
-            EC.presence_of_element_located((
+            EC.visibility_of_element_located((
                 By.CSS_SELECTOR, 
                 COURSE_LIST_MANAGEMENT_CONTAINER_SELECTOR,
             ))
         )
 
         print("Extracting course list")
+        self.show_maximum_course_cards()
         self.disable_course_filters_if_any()
         course_cards = self.wait_for_cards_to_load()
         courses_info = NTULearnClient.course_cards_to_info(course_cards)
@@ -243,7 +518,58 @@ class NTULearnClient:
             courses_info
         ))
         return open_courses_info
-   
+
+    def show_maximum_course_cards(self, timeout=5):
+        driver = self.driver
+
+        menu = driver.find_element(
+            By.CSS_SELECTOR, 
+            COURSE_LIST_ITEMS_PER_PAGE_BUTTON_SELECTOR
+        )
+        print(menu)
+        print(menu.is_displayed())
+        menu = WebDriverWait(driver, timeout).until(
+            #EC.element_to_be_clickable((
+            #EC.visibility_of_element_located((
+            EC.presence_of_element_located((
+                By.CSS_SELECTOR, 
+                COURSE_LIST_ITEMS_PER_PAGE_BUTTON_SELECTOR
+            ))
+        )
+        print(menu)
+        print(menu.is_displayed())
+        # click page item count menu to show dropdown
+        menu.click()
+        
+        # find option buttons
+        options = WebDriverWait(driver, timeout).until(
+            EC.visibility_of_all_elements_located((
+                By.CSS_SELECTOR, 
+                COURSE_LIST_ITEM_PER_PAGE_OPTION
+            ))
+        )
+
+        # find option with maximum value
+        max_count = 0
+        max_count_button = None
+        for option in options:
+            value = option.get_attribute("value");
+            try:
+                count = int(value)
+            except Exception as e:
+                logger.error(
+                    f"Found non-integer page item count option: {value}"
+                )
+                continue
+            if count > max_count:
+                max_count = count
+                max_count_button = option
+
+        # select maximum value option
+        if max_count > 0:
+            print(f"Setting page items to {max_count}")
+            max_count_button.click()
+
     def disable_course_filters_if_any(self, timeout=5):
         driver = self.driver
         chips = driver.find_elements(
@@ -304,7 +630,7 @@ class NTULearnClient:
                 Condition.course_cards_are_complete(cards_in_view)
             )
             offset = offset + n_in_viewport
-            logging.info(f'Course cards loaded: {offset}/{len(course_cards)}')
+            logger.info(f'Course cards loaded: {offset}/{len(course_cards)}')
             
             if has_remaining:
                 next_rect = Element.get_bounding_rect(
@@ -352,14 +678,19 @@ class NTULearnClient:
             EC.element_to_be_clickable((By.CSS_SELECTOR, css_selector)))
         btn_el.click()
 
-    def enumerate_content_folders(self, course_info, timeout=10):
+    def goto_course_content_tree(self, course_info, timeout=10):
         driver = self.driver
         course_id = course_info['course_id']
         path = NTULearnClient.COURSE_CONTENT_TREE_TEMPLATE.format(
             course_id
         )
-
         driver.get(path)
+
+    def enumerate_content_folders(self, course_info, timeout=10):
+        self.goto_course_content_tree(course_info)
+
+        driver = self.driver
+        course_id = course_info['course_id']
         contents = WebDriverWait(driver, timeout).until(
             EC.presence_of_all_elements_located((
                 By.CSS_SELECTOR, CONTENT_TREE_ITEM_SELECTOR 
@@ -414,10 +745,7 @@ class NTULearnClient:
                     parts.append(filename)
                 parent = Element.get_parent(driver, parent);
             path_parts = list(reversed(parts))
-            filepath = os_path.join(
-                course_info['short_name'], 
-                *path_parts
-            )
+            filepath = os.path.join(*path_parts)
             folders[elem_idx]['filepath'] = filepath
 
         leaf_folders = [] 
@@ -427,6 +755,11 @@ class NTULearnClient:
 
         return leaf_folders
     
+    def enumerate_attachments_for_course(self, course_info):
+        folders = self.enumerate_content_folders(course_info)
+        attachments = self.enumerate_attachments_for_folders(folders)
+        return attachments
+
     def enumerate_attachments_for_folders(self, folders, timeout=1):
         all_attachments = []
         for folder in folders:
@@ -434,7 +767,7 @@ class NTULearnClient:
                     folder, timeout=timeout)
             all_attachments.extend(folder_attachments)
         n = len(all_attachments)
-        logging.info(f"Found {n} attachments");
+        logger.info(f"Found {n} attachments");
         print(f'Found {n} attachments')
         return all_attachments
 
@@ -446,7 +779,7 @@ class NTULearnClient:
         href = folder['href']
 
         driver.get(href)
-        logging.debug(f'{selector} for {href}')
+        logger.debug(f'{selector} for {href}')
         try:
             attachment_elems = WebDriverWait(driver, timeout=timeout).until(
                 EC.presence_of_all_elements_located((
@@ -456,7 +789,7 @@ class NTULearnClient:
             )
             driver.implicitly_wait(1)
         except Exception as e: 
-            logging.warning(
+            logger.warning(
                 "Unable to locate any attachments "
                 f"for course:{course_id} content:{content_id} "
             )
@@ -474,19 +807,18 @@ class NTULearnClient:
                 displayed_filename = displayed_filename.strip()
                 displayed_filesize = displayed_filesize.strip()
                 cleaned_filename = clean_filename(displayed_filename) 
-                filepath = os_path.join(folder['filepath'], cleaned_filename)
+                filepath = os.path.join(folder['filepath'], cleaned_filename)
                 href = link_elem.get_attribute('href')
 
                 attachment_info = {
-                    'parentpath': folder['filepath'],
-                    'filesize': displayed_filesize,
-                    'filename': displayed_filename,
+                    'attachment': {
+                        'href': href,
+                    },
                     'filepath': filepath,
-                    'href': href,
                 }
                 attachment_infos.append(attachment_info)
             except Exception as e:
-                logging.warning(
+                logger.warning(
                     "Unable to retrieve attachment information for "
                     f"course:{course_id} content:{content_id} attachment:{a_idx}"
                 )
@@ -499,103 +831,328 @@ class NTULearnClient:
     
     def close(self):
         self.driver.quit()
+        self.log_thread_executor.shutdown(wait=False)
+    
+    def extract_m3u8_playlist(self, media_info, timeout=10):
+        driver = self.driver
+        start_time = time.time()
+        
+
+        filter_func = StatefulKalturaResponseHistoryFilter()
+        filter_func.prepare_for_use()
+
+        def get_responses():
+            with self.response_history_lock:
+                kaltura_m3u8s = list(filter(
+                    filter_func, self.response_history))
+            filter_func.prepare_for_use()
+            return kaltura_m3u8s
+
+        #filter_func.prepare_for_use()
+        name = media_info['name']
+        logger.info(
+            f'Extracting .m3u8 file from network responses for {name}'
+        )
+        driver.get(media_info['href'])
+        player = WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((
+                By.CSS_SELECTOR,
+                KALTURA_PLAYER_SELECTOR
+            ))
+        )
+
+        player.click()
+        m3u8_infos = []
+        seen = set()
+        for i in range(4): 
+            kaltura_m3u8s = get_responses()
+
+            for x in kaltura_m3u8s:
+                request_id = x['request_id']
+                if request_id in seen:
+                    continue
+                seen.add(request_id)
+                try:
+                    body = driver.execute_cdp_cmd("Network.getResponseBody", {
+                        "requestId": request_id
+                    })
+                    if body.get('base64Encoded') == True:
+                        body = base64.b64decode(body['body'])
+                        body = body.decode('utf-8')
+                    else:
+                        body = body['body']
+                    
+                    if M3U8.STREAM_INFO_PREFIX in body:
+                        # this file is the main manifest file
+                        filename = clean_filename(media_info['name'])
+                        filename = f'{filename}.m3u8'
+                        filepath = os.path.join('media', filename)
+                        logger.info(f'Extracted {filename}')
+                        return {
+                            'playlist': {
+                                'body': body,
+                            },
+                            'filepath': filepath,
+                        }
+
+                except Exception as e:
+                    logger.error(
+                        f'Error occured while extracting .m3u8:\n{e}'
+                    )
+            time.sleep(.5)
+        logger.warning('Did not find .m3u8')
+
+class ThreadSharedZipFile(zipfile.ZipFile):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._thread_shared_zf_lock = Lock()
+    
+    def writestr_with_lock(self, arcpath, content):
+        success = False
+        with self._thread_shared_zf_lock:
+            super().writestr(arcpath, content)
+            success = True
+        
+        return success
+
+    def write_with_lock(self, src_path, arcpath):
+        success = False
+        with self._thread_shared_zf_lock:
+            super().write(src_path, arcname=arcpath)
+            success = True
+        return success
 
 class Downloader:
-    def __init__(self, cookies={}, max_workers=None):
+    def __init__(self, 
+                 cookies={}, 
+                 max_workers=config.MAX_WORKERS, 
+                 temp_dir=None, 
+                 download_dir=None
+                 ):
         self.cookies = cookies
         self.max_workers = max_workers
+        self.executor = ThreadPoolExecutor(
+            max_workers=max_workers
+        )
+        self.ffmpeg_executor = ThreadPoolExecutor(
+            max_workers=1,
+        )
+        self.download_dir = download_dir
+        self.temp_dir = temp_dir
+
+    def download_content(self, idx, download_info, zf: ThreadSharedZipFile):
+        def done_callback(future):
+            download_info, error = future.result()
+            filepath = download_info['filepath']
+            if error:
+                msg = (
+                    'Error occured while downloading '
+                    f'{filepath}:\n{error}'
+                )
+                print(msg)
+                logger.error(msg)
+            else:
+                print(f'Successfully downloaded {filepath}')
+            
+        if 'playlist' in download_info:
+            future = self.executor.submit(
+                self.download_playlist,
+                idx,
+                download_info,
+                zf,
+            )
+            future.add_done_callback(done_callback)
+            return [future]
+        elif 'playlist_as_mp4' in download_info:
+            future = self.ffmpeg_executor.submit(
+                self.download_playlist_as_mp4,
+                idx,
+                download_info,
+                zf,
+            )
+            future.add_done_callback(done_callback)
+            return [future]
+        elif 'attachment' in download_info:
+            future = self.executor.submit(
+                self.download_attachment,
+                idx,
+                download_info,
+                zf,
+            )
+            future.add_done_callback(done_callback)
+            return [future]
+        else:
+            return []
+
+    def download_playlist(self, idx, download_info, zf):
+        try: 
+            filepath = download_info['filepath']
+            print(f'Downloading {filepath}')
+            playlist_info = download_info['playlist']
+            content = playlist_info['body']
+            zf.writestr_with_lock(filepath, content)
+            return download_info, None
+        except Exception as e:
+            return download_info, e
+
+    def download_playlist_as_mp4(self, idx, download_info, zf):
+        try: 
+            filepath = download_info['filepath']
+            print(f'Downloading {filepath}')
+
+            playlist_info = download_info['playlist_as_mp4']
+            parsed = M3U8.parse_m3u8(playlist_info['body'])
+
+            # select stream 0 (highest bandwidth stream)
+            stream = parsed['streams'][0]
+
+            # build ffmpeg command
+            cmd = [config.FFMPEG_PATH]
+            cmd.extend([
+                '-i', stream['URI'],
+            ])
+            for sub in stream['subtitles']:
+                cmd.extend([
+                    '-i', sub['URI'],
+                ])
+
+            # single AV stream
+            cmd.extend([
+                '-map', '0:v',
+                '-map', '0:a',
+            ])
+
+            # multi sub track
+            for sub_idx, sub in enumerate(stream['subtitles']):
+                cmd.extend([
+                    '-map', f'{sub_idx+1}:s',
+                ])
+            cmd.extend([
+                '-c:v', 'copy',
+                '-c:a', 'copy',
+            ])
+            if len(stream['subtitles']) > 0:
+                cmd.extend([
+                    '-c:s', 'mov_text',
+                ])
+        
+            random_name = str(uuid.uuid4()) + '.mp4'
+            outpath = os.path.join(self.temp_dir, random_name)
+            cmd.append(outpath)
+                
+            p = subprocess.Popen(cmd, text=True, stderr=subprocess.PIPE)
+            duration = None
+            n_opened = 0
+            for line in p.stderr:
+                line = line.strip()
+                if 'Duration:' in line and duration is None:
+                    m = re.search(r'Duration: ([0-9:.]+)', line)
+                    duration = m.group(0)
+                elif 'time=' in line:
+                    m = re.search(r'time=([0-9:.]+)', line)
+                    time = m.group(0)
+                    msg = (
+                        f'Progress: {time}/{duration}'
+                        #f' | {n_opened} files opened'
+                    )
+                    logger.info(msg)
+                #elif 'Opening' in line:
+                    #n_opened += 1
+                    #logger.debug(line)
+            p.wait()
+
+            if os.path.exists(outpath):
+                zf.write_with_lock(outpath, filepath)
+
+            return download_info, None
+        except Exception as e:
+            return download_info, e
     
-    def download_content(self, attachment_info):
+    def download_attachment(self, idx, download_info, zf):
         try:
-            filename = attachment_info['filename']
+            filepath = download_info['filepath']
+            print(f'Downloading {filepath}')
+            attachment_info = download_info['attachment']
             href = attachment_info['href']
-            logging.info(f'Downloading {filename}')
-            print(f'Downloading {filename}')
             sess = RequestsSession()
             sess.cookies.update(self.cookies)
             res = sess.get(href)
             content = res.content
-            return attachment_info, content, None
+            zf.writestr_with_lock(filepath, content)
+            return download_info, None
         except Exception as e:
-            return attachment_info, None, e
-    
+            return download_info, e
+  
     def download_all_to_zip(
-        self, zf_path, attachment_infos, overwrite=False
+        self, 
+        download_infos,
+        overwrite=False
     ):
-        if os_path.exists(zf_path) and not overwrite:
-            raise Exception(f'{zf_path} already exists')
+        zf_name = str(uuid.uuid4()) + '.zip'
+        zf_path = os.path.join(self.download_dir, zf_name)
 
-        lock = Lock()
-        locked_items = {
-            'zf': zipfile.ZipFile(zf_path, 'w'),
-            'successful_downloads': 0,
-        }
-        executor = ThreadPoolExecutor(max_workers=self.max_workers)
-
-        def done_callback(future):
-            attachment_info, content, error = future.result()
-            filename = attachment_info['filename']
-            filepath = attachment_info['filepath']
-
-            if content is not None:
-                arc_path = attachment_info['filepath']
-                with lock:
-                    locked_items['zf'].writestr(arc_path, content)
-                    locked_items['successful_downloads'] += 1
-                    logging.debug(
-                        f'Created entry for {filename} in {zf_path}: '
-                        f'{arc_path}'
-                    )
-            else:
-                filename = attachment_info['filename']
-                logging.error(f"Failed to download {filename}\n{error}")
-
-        logging.info(f'Downloading files to {zf_path}')
+        zf = ThreadSharedZipFile(zf_path, 'w')
+        logger.info(f'Downloading files to {zf_path}')
         print(f'Downloading files to {zf_path}')
-        for attachment_info in attachment_infos:
-            future = executor.submit(
-                self.download_content, 
-                attachment_info
-            )
-            future.add_done_callback(done_callback)
 
+        all_futures = []
+        for info_idx, download_info in enumerate(download_infos):
+            futures = self.download_content(info_idx, download_info, zf)
+            all_futures.extend(futures)
 
-        executor.shutdown(wait=True)
-        with lock:
-            count = locked_items['successful_downloads']
-            total = len(attachment_infos)
-            logging.info(
-                f'Downloaded {count} of {total} files to {zf_path}'
-            )
-            print(
-                f'Downloaded {count} of {total} files to {zf_path}'
-            )
-        locked_items['zf'].close()
+        wait_for_futures(all_futures)
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--download-dir', 
-        default=DOWNLOAD_DIR, 
+        default=config.DOWNLOAD_DIR, 
         help='directory to download files to'
     )
     parser.add_argument(
         '--email', 
-        default=EMAIL,
+        default=config.EMAIL,
         help='NTU email (e.g. bob1234@e.ntu.edu.sg)'
     )
     parser.add_argument(
         '--password',
-        default=PASSWORD,
+        default=config.PASSWORD,
         help='NTU email password',
     )
     parser.add_argument(
         '--max-concurrent', 
-        default=MAX_WORKERS,
-        help='Maximum number of workers used when downloading',
+        default=config.MAX_WORKERS,
+        help='Maximum number of workers used when downloading attachments',
+    )
+    parser.add_argument(
+        '--use-ffmpeg',
+        action='store_true',
+        help=(
+            'Set this flag to indicate that the script should use '
+            'ffmpeg to convert .m3u8 playlist to .mp4. '
+            'Requires "ffmpeg" to be installed.'
+        )
+    )
+    parser.add_argument(
+        '--ffmpeg-path',
+        default=config.FFMPEG_PATH,
+        help='Path to ffmpeg',
     )
     
     args = parser.parse_args()
+
+    if args.use_ffmpeg:
+        path = shutil.which(args.ffmpeg_path)
+        if path is None:
+            logger.warning(
+                f'ffmpeg cannot be found at: {args.ffmpeg_path}. '
+                'Please install ffmpeg to use this feature'
+            )
+            args.use_ffmpeg = False
+    
+    args.download_dir = os.path.expanduser(args.download_dir)
+    args.download_dir = os.path.abspath(args.download_dir)
+
     return args
 
 if __name__ == '__main__':
@@ -614,19 +1171,47 @@ if __name__ == '__main__':
     # prompt user to select course to download from
     for i, x in enumerate(course_infos):
         print(f'{i+1}. {x["long_name"]}')
+
     selected = input('Select a course: ')
     course_info = course_infos[int(selected) - 1] 
+    download_infos = []
+
     folders = client.enumerate_content_folders(course_info)
     attachment_infos = client.enumerate_attachments_for_folders(folders)
-    client.close()
+    download_infos.extend(attachment_infos)
 
-    downloader = Downloader(
-        max_workers=args.max_concurrent,
-        cookies=driver_cookies,
-    )
-    time_since_epoch = int(time.time())
-    zipname = course_info['short_name']
-    zipname = f'{zipname}_{time_since_epoch}.zip'
-    zip_path = os_path.join(DOWNLOAD_DIR, zipname)
-    downloader.download_all_to_zip(zip_path, attachment_infos)
+    media_infos = client.enumerate_course_media(course_info) 
+    media_infos = media_infos
+    playlist_infos = client.extract_playlists_from_media_infos(media_infos)
+    download_infos.extend(playlist_infos)
+
+    if args.use_ffmpeg:
+        playlist_as_mp4_infos = [{
+            'playlist_as_mp4': x['playlist'],
+            'filepath': x['filepath'].replace('.m3u8', '.mp4'),
+        } for x in playlist_infos]
+        download_infos.extend(playlist_as_mp4_infos)
+    
+    for x in download_infos:
+        x['filepath'] = os.path.join(
+            course_info['short_name'], 
+            x['filepath']
+        )
+
+    client.close()
+    
+    with tempfile.TemporaryDirectory(
+        dir=args.download_dir,
+        prefix='ntu-learn-downloader-',
+        suffix='-temp'
+    ) as tmpdir:
+        downloader = Downloader(
+            max_workers=args.max_concurrent,
+            cookies=driver_cookies,
+            download_dir=args.download_dir,
+            temp_dir=tmpdir,
+        )
+        downloader.download_all_to_zip(
+            download_infos,
+        )
 

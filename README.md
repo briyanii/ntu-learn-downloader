@@ -9,9 +9,9 @@ python -m pip install selenium==4.38.0
 
 ## Usage
 ```
-usage: download_files.py [-h] [--download-dir DOWNLOAD_DIR] [--email EMAIL]
-                         [--password PASSWORD]
-                         [--max-concurrent MAX_CONCURRENT]
+python download_files.py --help
+usage: download_files.py [-h] [--download-dir DOWNLOAD_DIR] [--email EMAIL] [--password PASSWORD]
+                         [--max-concurrent MAX_CONCURRENT] [--use-ffmpeg] [--ffmpeg-path FFMPEG_PATH]
 
 options:
   -h, --help            show this help message and exit
@@ -20,8 +20,25 @@ options:
   --email EMAIL         NTU email (e.g. bob1234@e.ntu.edu.sg)
   --password PASSWORD   NTU email password
   --max-concurrent MAX_CONCURRENT
-                        Maximum number of workers used when downloading
+                        Maximum number of workers used when downloading attachments
+  --use-ffmpeg          Set this flag to indicate that the script should use ffmpeg to convert .m3u8
+                        playlist to .mp4. Requires "ffmpeg" to be installed.
+  --ffmpeg-path FFMPEG_PATH
+                        Path to ffmpeg
 ```
+## Config
+Credentials and download directory can be hard coded into the script by modifying the `config.py` file.
+* `DOWNLOAD_DIR`: set this to the location you want to download the .zip files to. `~/Downloads` by default.
+* `EMAIL` and `PASSWORD`: your credentials
+* `FFMPEG_PATH`: path to ffmpeg, "ffmpeg" by default
+
+## User Credentials
+The script provides 3 ways to input your password. 
+1. Entering it upon being prompted by the script
+2. Passing it as a command line argument with the `--password` flag
+3. Hard coding it into the `config.py` file
+
+> Using the `--password` flag or hard coding your password into the `config.py` file will expose your password in plain-text. This is considered bad practice in terms of security. You may choose to do so at your own convenience, but understand that doing so can be risky, especially on a shared device.
 
 ## What the script does
 1. Prompt you for your email & password, unless you have modified the script
@@ -30,26 +47,16 @@ options:
 3. Prompt you to choose a course to download files from
 4. Extracts content folder structure from `https://ntulearn.ntu.edu.sg/webapps/blackboard/content/courseMenu.jsp?course_id={course_id}&newWindow=true&openInParentWindow=true`
 5. Extracts attachment URLS from those content folder sections
-6. Downloads all the files to `<DOWNLOAD_DIR>/<COURSE_NAME>_<TIME>.zip`
+6. Extracts media links from Course Media page
+7. Starts playing each video to trigger request for HLS stream / .m3u8 files
+8. Retrieves .m3u8 file containing `#EXT-X-STREAM-INF` from network responses using Chrome Devtools Protocol
+9. Downloads all the files to `<DOWNLOAD_DIR>/<RANDOM_UUID>.zip`
 
-## Config
-Credentials and download directory can be hard coded into the script.
-Search for the section below (around line 22) and update the values
-```
-# ================== HARDCODED CONFIG / CREDENTIALS ================
-# NTU email (e.g. bob1234@e.ntu.edu.sg)
-EMAIL = None
-
-# Location on disk to download .zip folders to
-DOWNLOAD_DIR = os_path.expand_user('~/Downloads')
-
-# It is bad practice to save passwords in plain-text
-# do so at your own risk
-PASSWORD = None
-
-# maximum threads for concurrent downloads
-MAX_WORKERS = 8
-```
+## How to play .m3u8 files
+* Open file in browser `file://<PATH_TO_M3U8_FILE>`
+* Use a video player like VLC
+* ffmpeg
+* ...?
 
 ## Help
 - If the script crashes due to webdriver timeout or stale element, try running the script again.
