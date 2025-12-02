@@ -58,6 +58,24 @@ The script provides 3 ways to input your password.
 * ffmpeg
 * ...?
 
+## How to convert the .m3u8 files to mp4 manually.
+
+`path/to/stream` is the URI under the #EXT-X-STREAM-INF headers
+`path/to/subtitles` is the URI on the #EXT-X-MEDIA line
+
+```
+ffmpeg \
+    -i path/to/stream \
+    -i path/to/subtitles \
+    -map 0:v \
+    -map 0:a \
+    -map 1:s \
+    -c:v copy \
+    -c:a copy \
+    -c:s mov_text \
+    path/to/output.mp4
+```
+
 ## Help
 - If the script crashes due to webdriver timeout or stale element, try running the script again.
 

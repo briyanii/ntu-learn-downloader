@@ -926,8 +926,9 @@ class Downloader:
     def __init__(self, 
                  cookies={}, 
                  max_workers=config.MAX_WORKERS, 
+                 download_dir=config.DOWNLOAD_DIR,
+                 ffmepg_path=config.FFMPEG_PATH,
                  temp_dir=None, 
-                 download_dir=None
                  ):
         self.cookies = cookies
         self.max_workers = max_workers
@@ -937,6 +938,7 @@ class Downloader:
         self.ffmpeg_executor = ThreadPoolExecutor(
             max_workers=1,
         )
+        self.ffmpeg_path = ffmpeg_path
         self.download_dir = download_dir
         self.temp_dir = temp_dir
 
@@ -1007,7 +1009,7 @@ class Downloader:
             stream = parsed['streams'][0]
 
             # build ffmpeg command
-            cmd = [config.FFMPEG_PATH]
+            cmd = [self.ffmpeg_path]
             cmd.extend([
                 '-i', stream['URI'],
             ])
