@@ -1,6 +1,7 @@
 #!/bin/python3
 # ==================== IMPORTS ===========================
 import json
+import shutil
 import uuid
 import re
 import base64
