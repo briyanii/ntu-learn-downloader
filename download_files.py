@@ -928,7 +928,7 @@ class Downloader:
                  cookies={}, 
                  max_workers=config.MAX_WORKERS, 
                  download_dir=config.DOWNLOAD_DIR,
-                 ffmepg_path=config.FFMPEG_PATH,
+                 ffmpeg_path=config.FFMPEG_PATH,
                  temp_dir=None, 
                  ):
         self.cookies = cookies
